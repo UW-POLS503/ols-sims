@@ -6,30 +6,30 @@ date: April 12, 2017
 
 # Prerequisites
 
-```{r }
-library("tidyverse")
+Before starting, load the necessary packages and define some functions that will be used later.
 
-# Combine standard deviation and corrlation with covariance
+```{r message=FALSE}
+library("tidyverse")
+```
+
+Combine standard deviation and correlation to make a covariance function:
+```{r}
 sdcor2cov <- function(s, r = diag(length(s))) {
   s <- diag(s, nrow = length(s), ncol = length(s))
   s %*% r %*% s
 }
+```
 
-# Generate a data frame with multivariate normal variables
+Generate a data frame with multivariate normal variables:
+```{r}
 mvnorm_df <- function(n, mu, Sigma = diag(length(mu)), empirical = TRUE) {
   as_tibble(MASS::mvrnorm(n, mu = mu, Sigma = Sigma, empirical = empirical))
 }
 ```
 
-Find regression standard error to produce a given R-squared
+Find a regression standard error that will produce a given $R^2$.
 
-@description For a normal linear model, given a sample X and population beta,
-find the regression standard deviation to produce the desired R-squared.
-
-@param y The expected value of Y
-@param r2 The desired R^2
-@return The regression standard deviation to produce that R^2.
-@export
+For a normal linear model, given a sample $\hat{y}$ find the regression standard error, $\sigma^2$ to produce the desired $R^2$.
 
 ```{r }
 r2_to_sigma <- function(y, r2) {
@@ -44,19 +44,21 @@ r2_to_sigma <- function(y, r2) {
 
 # Classical Model
 
+$$
+\begin{aligned}[t]
+\vec{y} &= \mat{X} \vec{\beta} + \vec{\epsilon} \\
+\epsilon_i &\sim N(0, \sigma^2)
+\end{aligned}
+$$
+
+The following function will simulate data from a linear model with i.i.d. normally distributed errors.
+
+- `.data`: Data frame with covariates in $X$
+- `beta`: Coefficients
+- `sigma`: Standard error of the regression
+- `ov`: Any variables omitted when estimating OLS
+
 ```{r}
-n <- 100
-k <- 5
-mu <- rep(0, k)
-beta <- c(0, rep(1, k))
-X <- mvnorm_df(n, rep(0, k), diag(k))
-E_y <- cbind(1, as.matrix(X)) %*% beta
-sigma_y <- r2_to_sigma(E_y, 0.5)
-
-
-# Simulate from linear model model
-# Y ~ N(XB, sigma2), with fixed X
-# Note: use a vector of sigma for
 sim_lm_normal <- function(.data, beta, sigma, ov = NULL) {
   n <- nrow(X)
   # Generate the formula to estimate (potentially removing variables)
@@ -65,11 +67,31 @@ sim_lm_normal <- function(.data, beta, sigma, ov = NULL) {
   E_y <- cbind(1, as.matrix(.data)) %*% beta
   eps <- rnorm(n, mean = 0, sd = sigma)
   .data$y <- E_y + eps
-  eval(bquote(lm(.(f), data = .data, model.frame = FALSE, y = FALSE, X = FALSE)))
+  # Do not save model.frame
+  lm(f, data = .data, model = FALSE)
 }
 ```
 
+```{r}
+n <- 100
+k <- 5
+mu <- rep(0, k)
+beta <- c(0, rep(1, k))
+X <- mvnorm_df(n, rep(0, k), diag(k))
+E_y <- cbind(1, as.matrix(X)) %*% beta
+sigma_y <- r2_to_sigma(E_y, 0.5)
+```
+
+```{r}
+n_sims <- 2048
+mods_1 <- rerun(n_sims, sim_lm_normal(X, beta, sigma_y))
+```
+
+
+
 # Random X
+
+In the previous example, the data, $X$ are fixed. What happens if $X$ is random? 
 
 ```{r}
 # Simulate from linear model model
@@ -83,25 +105,26 @@ sim_lm_random_X <- function(n, mu_X, Sigma_X, beta, sigma_y, ov = NULL) {
   E_y <- cbind(1, as.matrix(.data)) %*% beta
   eps <- rnorm(n, mean = 0, sd = sigma)
   .data$y <- E_y + eps
-  eval(bquote(lm(.(f), data = .data, model.frame = FALSE, y = FALSE, X = FALSE)))
+  lm(f, data = .data, model = FALSE)
 }
+```
 
-# Simulate from student t error and estimate with OLS
-sim_lm_t <- function(.data, beta, sigma, df = 3, ov = NULL) {
-  # if ov is not specified use the last variable in .datas
-  ov <- ov %||% names(.data)[ncol(.data)]
-  n <- nrow(X)
-  E_y <- cbind(1, as.matrix(.data)) %*% beta
-  eps <- rt(n, df = df) * sigma
-  .data$y <- E_y + eps
-  # generate linear regression formula - which excludes the
-  # omitted variable
-  lm(f, data = .data, model.frame = FALSE, y = FALSE, X = FALSE)
-}
+# Non-normal distribution
 
-#  Simulate from skewed Student-t distribution
-# df = degrees of freedom as in Student-t
-# xi = skewnewss. (0, 1) = left skew, 1 = symmetric. > 1 = right skew
+What about if the errors are i.i.d, but generated from a non-normal distribution?
+
+There are two issues with the error distribution that will be considered:
+
+1. it is skewed 
+2. it has wider tails than a normal distribution
+
+We will handle both of these by considering errors generated from a skew t-distribution.
+The skew t-distribution is an extension of the Student's t-distribution that allows for skewness.
+
+- `df` = degrees of freedom, as in Student's t distribution When `df = Inf` it is the normal distribution, as `df` decreases, the tails of the distribution are wider than the normal
+- `xi` is the skewnewss parameter. If it is in (0, 1) it is left skew, if it is 1 then it is symmetric, and if `xi > 1` it is right skewed.
+
+```{r}
 sim_skewt <- function(.data, beta, sigma, df = 5, skew = 1.5, ov = NULL) {
   # if ov is not specified use the last variable in .datas
   ov <- ov %||% names(.data)[ncol(.data)]
@@ -112,10 +135,21 @@ sim_skewt <- function(.data, beta, sigma, df = 5, skew = 1.5, ov = NULL) {
   # generate linear regression formula - which excludes the
   # omitted variable
   f <- paste0("y", "~", paste0(setdiff(names(.data), ov), collapse = "+"))
-  lm(f, data = .data, model.frame = FALSE, y = FALSE, X = FALSE)
+  lm(f, data = .data, model = FALSE)
 }
+```
 
-# Simulate clustered lm model
+# Non-constant errors 
+
+What if the errors are not constant? This can be done using `sim_lin_normal` by passing a vector to `sigma`.
+
+# Correlated errors
+
+## Clustered
+
+What if the errors are clustered? 
+
+```{r}
 sim_cluster <- function(.data, groups, beta, sigma_y, sigma_g) {
   n <- nrow(X)
   g <- cut_number(seq_len(n), groups, labels = false)
@@ -129,7 +163,13 @@ sim_cluster <- function(.data, groups, beta, sigma_y, sigma_g) {
   f <- paste0("y", "~", paste0(names(.data), collapse = "+"))
   lm(f, data = .data, model.frame = FALSE, y = FALSE, X = FALSE)
 }
+```
 
+## Serial Correlation
+
+What if the errors are correlated over time? 
+
+```{r}
 sim_armax <- function(.data, groups, beta, sigma_y, ar = NULL, ma = NULL) {
   n <- nrow(X)
   E_y <- cbind(1, as.matrix(.data)) %*% beta
@@ -161,11 +201,15 @@ sim_measure_error <- function(.data, beta, sigma_y, rho) {
   # add y to the data frame
   .data$y <- y
   f <- paste0("y", "~", paste0(names(.data), collapse = "+"))
-  lm(f, data = .data, model.frame = FALSE, y = FALSE, X = FALSE)
+  lm(f, data = .data, model = FALSE)
 }
 ```
 
-# Truncated 
+# Selection on Outcome and Predictors
+
+## Selection on the Outcome
+
+What if the sample is selected based on the value of $y$? This is often called "selection on the dependent variable"?
 
 ```{r} 
 sim_select_y <- function(.data, beta, sigma_y, ub = 1, lb = 0) {
@@ -184,7 +228,7 @@ sim_select_y <- function(.data, beta, sigma_y, ub = 1, lb = 0) {
 }
 ```
 
-# Truncated X variables
+## Selection on Predictors
 
 ```{r}
 sim_select_x <- function(.data, beta, sigma_y, ub = 1, lb = 0) {
@@ -211,7 +255,7 @@ sim_select_x <- function(.data, beta, sigma_y, ub = 1, lb = 0) {
   # add y to the data frame
   .data$y <- y
   f <- paste0("y", "~", paste0(names(.data), collapse = "+"))
-  lm(f, data = .data, model.frame = FALSE, y = FALSE, X = FALSE)
+  lm(f, data = .data, model = FALSE)
 }
 ```
 
