@@ -4,33 +4,46 @@ author: Jeffrey Arnold
 date: April 12, 2017
 ---
 
+$$
+\DeclareMathOperator{diag}{diag}
+$$
+
 # Prerequisites
 
 Before starting, load the necessary packages and define some functions that will be used later.
 
 ```{r message=FALSE}
 library("tidyverse")
+library("stringr")
+library("broom")
+library("modelr")
 ```
 
-Combine standard deviation and correlation to make a covariance function:
+Combine standard deviation and correlation to make a covariance function.
 ```{r}
 sdcor2cov <- function(s, r = diag(length(s))) {
   s <- diag(s, nrow = length(s), ncol = length(s))
   s %*% r %*% s
 }
 ```
+The $n \times n$ covariance matrix $\Sigma$ can be decomposed into the $n \times 1$ standard deviation vector $\sigma$ and correlation matrix $R$,
+$$
+\Sigma = \diag(\sigma) R \diag(\sigma)
+$$
 
-Generate a data frame with multivariate normal variables:
+Generate a data frame with possibly correlated, multivariate normal variables.
+The multivariate normal distribution is specified in terms of a mean (`mu`), 
+standard deviation for variable (`sigma`), and the correlation matrix between variables,
+(`R`):
 ```{r}
-mvnorm_df <- function(n, mu, Sigma = diag(length(mu)), empirical = TRUE) {
-  as_tibble(MASS::mvrnorm(n, mu = mu, Sigma = Sigma, empirical = empirical))
+mvnorm_df <- function(n, mu, sigma = rep(1, length(mu)), R = diag(length(sd)),
+                      empirical = TRUE) {
+  as_tibble(MASS::mvrnorm(n, mu = mu, Sigma = sdcor2cov(sigma, R), empirical = empirical))
 }
 ```
 
 Find a regression standard error that will produce a given $R^2$.
-
 For a normal linear model, given a sample $\hat{y}$ find the regression standard error, $\sigma^2$ to produce the desired $R^2$.
-
 ```{r }
 r2_to_sigma <- function(y, r2) {
   # Var(Y) = E(Var(Y|X)) + Var(E(Y|X))
@@ -60,7 +73,7 @@ The following function will simulate data from a linear model with i.i.d. normal
 
 ```{r}
 sim_lm_normal <- function(.data, beta, sigma, ov = NULL) {
-  n <- nrow(X)
+  n <- nrow(.data)
   # Generate the formula to estimate (potentially removing variables)
   f <- paste0("y", "~", paste0(setdiff(names(.data), ov), collapse = "+"))
   # generate and add y variable
@@ -68,25 +81,72 @@ sim_lm_normal <- function(.data, beta, sigma, ov = NULL) {
   eps <- rnorm(n, mean = 0, sd = sigma)
   .data$y <- E_y + eps
   # Do not save model.frame
-  lm(f, data = .data, model = FALSE)
+  mod <- lm(f, data = .data, model = FALSE)
+  # keep only the coefficients and their standard errors
+  tidy(mod)[ , c("term", "estimate", "std.error")]
 }
 ```
 
 ```{r}
 n <- 100
-k <- 5
-mu <- rep(0, k)
+k <- 1
 beta <- c(0, rep(1, k))
-X <- mvnorm_df(n, rep(0, k), diag(k))
+mu <- rep(0, k)
+X <- mvnorm_df(n, rep(0, k))
 E_y <- cbind(1, as.matrix(X)) %*% beta
 sigma_y <- r2_to_sigma(E_y, 0.5)
 ```
 
+Run `sim_lm_normal` with these parameters `n_sims` times:
 ```{r}
 n_sims <- 2048
-mods_1 <- rerun(n_sims, sim_lm_normal(X, beta, sigma_y))
+res_sim1 <- map_df(seq_len(n_sims), function(i) sim_lm_normal(X, beta, sigma_y), .id = ".id")
 ```
 
+For these simulations, calculate the bias of the regression coefficients and standard error of the regression coefficient:
+```{r}
+res_sim1 %>%
+  filter(term != "(Intercept)") %>%
+  summarise(beta_hat_mean = mean(estimate),
+            beta_hat_sd = sd(estimate),
+            se_mean = mean(std.error),
+            se_sd = sd(std.error)) %>%
+  mutate(beta_hat_bias = (beta_hat_mean - beta[-1]),
+         se_bias = (se_mean - beta_hat_sd))
+
+```
+
+Now rerun `sim_lm_normal` simultions, but vary the size of the sample
+```{r}
+sample_size <- c(8, 64, 512, 4096)
+```
+
+For each of these sample size, we will run `r n_sims` simulations, and save the results in a data fram along with the sample size:
+```{r}
+run_sim1a <- function(n) {
+  X <- mvnorm_df(n, mu = rep(0, k))
+  out <- map_df(seq_len(n_sims), 
+                function(i) sim_lm_normal(X, beta, sigma_y), .id = ".id")
+  out$n <- n
+  out
+}
+```
+Now run the above function for each sample size and return the results as a data frame with all simulations and sample sizes:
+```{r}
+res_sim1a <- map_df(sample_size, run_sim1a)
+```
+
+```{r}
+res_sim1a %>%
+  filter(term != "(Intercept)") %>%
+  group_by(n) %>%
+  summarise(beta_hat_mean = mean(estimate),
+            beta_hat_sd = sd(estimate),
+            se_mean = mean(std.error),
+            se_sd = sd(std.error)) %>%
+  mutate(beta_hat_bias = (beta_hat_mean - beta[-1]),
+         se_bias = (se_mean - beta_hat_sd))
+```
 
 
 # Random X
@@ -96,9 +156,8 @@ In the previous example, the data, $X$ are fixed. What happens if $X$ is random?
 ```{r}
 # Simulate from linear model model
 # random X uncorrelated with Y
-sim_lm_random_X <- function(n, mu_X, Sigma_X, beta, sigma_y, ov = NULL) {
-  n <- nrow(X)
-  .data <- mvnorm_df(n, mu = mu_X, Sigma = Sigma_X)
+sim_lm_random_X <- function(n, mu_X, sigma_X, R_X, beta, sigma_y, ov = NULL) {
+  .data <- mvnorm_df(n, mu = mu_X, sigma = sigma_X, R = R_X,
   # Generate the formula to estimate (potentially removing variables)
   f <- paste0("y", "~", paste0(setdiff(names(.data), ov), collapse = "+"))
   # generate and add y variable
@@ -108,6 +167,8 @@ sim_lm_random_X <- function(n, mu_X, Sigma_X, beta, sigma_y, ov = NULL) {
   lm(f, data = .data, model = FALSE)
 }
 ```
+
+**TODO**
 
 # Non-normal distribution
 
@@ -128,7 +189,7 @@ The skew t-distribution is an extension of the Student's t-distribution that all
 sim_skewt <- function(.data, beta, sigma, df = 5, skew = 1.5, ov = NULL) {
   # if ov is not specified use the last variable in .datas
   ov <- ov %||% names(.data)[ncol(.data)]
-  n <- nrow(X)
+  n <- nrow(.data)
   E_y <- cbind(1, as.matrix(.data)) %*% beta
   eps <- fGarch::rsstd(n, mean = 0, sd = sigma, nu = df, xi = skew)
   .data$y <- E_y + eps
@@ -143,15 +204,18 @@ sim_skewt <- function(.data, beta, sigma, df = 5, skew = 1.5, ov = NULL) {
 
 What if the errors are not constant? This can be done using `sim_lin_normal` by passing a vector to `sigma`.
 
+
+
 # Correlated errors
 
 ## Clustered
 
-What if the errors are clustered? 
+What if the errors are clustered? This means that within each group the errors are correlated.
+
 
 ```{r}
 sim_cluster <- function(.data, groups, beta, sigma_y, sigma_g) {
-  n <- nrow(X)
+  n <- nrow(.data)
   g <- cut_number(seq_len(n), groups, labels = false)
   E_y <- cbind(1, as.matrix(.data)) %*% beta
   # individual random error
@@ -171,7 +235,7 @@ What if the errors are correlated over time?
 
 ```{r}
 sim_armax <- function(.data, groups, beta, sigma_y, ar = NULL, ma = NULL) {
-  n <- nrow(X)
+  n <- nrow(.data)
   E_y <- cbind(1, as.matrix(.data)) %*% beta
   # ARMA
   eps <- arima.sim(list(ar = ar, ma = ma), n, sd = sigma_y)
@@ -181,9 +245,14 @@ sim_armax <- function(.data, groups, beta, sigma_y, ar = NULL, ma = NULL) {
   f <- paste0("y", "~", paste0(names(.data), collapse = "+"))
   lm(f, data = .data, model.frame = FALSE, y = FALSE, X = FALSE)
 }
+```
 
+
+## Measurement Error
+
+```{r}
 sim_measure_error <- function(.data, beta, sigma_y, rho) {
-  n <- nrow(X)
+  n <- nrow(.data)
   E_y <- cbind(1, as.matrix(.data)) %*% beta
   eps <- rnorm(n, mean = 0, sd = sigma_y)
   y <- E_y + eps
@@ -205,6 +274,8 @@ sim_measure_error <- function(.data, beta, sigma_y, rho) {
 }
 ```
 
+
+
 # Selection on Outcome and Predictors
 
 ## Selection on the Outcome
@@ -213,7 +284,7 @@ What if the sample is selected based on the value of $y$? This is often called "
 
 ```{r} 
 sim_select_y <- function(.data, beta, sigma_y, ub = 1, lb = 0) {
-  n <- nrow(X)
+  n <- nrow(.data)
   E_y <- cbind(1, as.matrix(.data)) %*% beta
   eps <- rnorm(n, mean = 0, sd = sigma_y)
   y <- E_y + eps
@@ -232,7 +303,7 @@ sim_select_y <- function(.data, beta, sigma_y, ub = 1, lb = 0) {
 
 ```{r}
 sim_select_x <- function(.data, beta, sigma_y, ub = 1, lb = 0) {
-  n <- nrow(X)
+  n <- nrow(.data)
   E_y <- cbind(1, as.matrix(.data)) %*% beta
   eps <- rnorm(n, mean = 0, sd = sigma_y)
   y <- E_y + eps
