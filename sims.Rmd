@@ -2,6 +2,8 @@
 title: OLS Simulations
 author: Jeffrey Arnold
 date: April 12, 2017
+editor_options: 
+  chunk_output_type: console
 ---
 
 $$
@@ -19,8 +21,13 @@ library("broom")
 library("modelr")
 ```
 
-Combine standard deviation and correlation to make a covariance function.
-```{r}
+A useful result is that the covariance of a matrix ($\Sigma$) can be decomposed into a correlation matrix ($R$) and a vector of standard deviations ($\sigma$),
+$$
+\Sigma = \sigma' R \sigma
+$$
+This is useful because it can be easier to reason about correlation between random variables and their scales separately.
+In this application, results will depend on the correlation, but it will be useful to understand the relationship separely,
+```{r sdcor2cov}
 sdcor2cov <- function(s, r = diag(length(s))) {
   s <- diag(s, nrow = length(s), ncol = length(s))
   s %*% r %*% s
@@ -35,15 +42,16 @@ Generate a data frame with possibly correlated, multivariate normal variables.
 The multivariate normal distribution is specified in terms of a mean (`mu`), 
 standard deviation for variable (`sigma`), and the correlation matrix between variables,
 (`R`):
-```{r}
+```{r mvnorm_df}
 mvnorm_df <- function(n, mu, sigma = rep(1, length(mu)), R = diag(length(sd)),
                       empirical = TRUE) {
-  as_tibble(MASS::mvrnorm(n, mu = mu, Sigma = sdcor2cov(sigma, R), empirical = empirical))
+  as_tibble(MASS::mvrnorm(n, mu = mu, Sigma = sdcor2cov(sigma, R), 
+                          empirical = empirical))
 }
 ```
 
-Find a regression standard error that will produce a given $R^2$.
 For a normal linear model, given a sample $\hat{y}$ find the regression standard error, $\sigma^2$ to produce the desired $R^2$.
+While sample $R^2$ is not good for many things, it will easier to reason about it when choosing appropriate standard errors than the standard errors themselves.
 ```{r }
 r2_to_sigma <- function(y, r2) {
   # Var(Y) = E(Var(Y|X)) + Var(E(Y|X))
@@ -71,262 +79,194 @@ The following function will simulate data from a linear model with i.i.d. normal
 - `sigma`: Standard error of the regression
 - `ov`: Any variables omitted when estimating OLS
 
+OLS sampler:
+
+- function to generate data
+- function to model
+
 ```{r}
-sim_lm_normal <- function(.data, beta, sigma, ov = NULL) {
-  n <- nrow(.data)
-  # Generate the formula to estimate (potentially removing variables)
-  f <- paste0("y", "~", paste0(setdiff(names(.data), ov), collapse = "+"))
+sim_lm_normal <- function(data, formula, beta, sigma = 1) {
+  # Simulate from model
+  n <- nrow(data)
   # generate and add y variable
-  E_y <- cbind(1, as.matrix(.data)) %*% beta
+  E_y <- model.matrix(formula, data = data) %*% beta
   eps <- rnorm(n, mean = 0, sd = sigma)
-  .data$y <- E_y + eps
-  # Do not save model.frame
-  mod <- lm(f, data = .data, model = FALSE)
-  # keep only the coefficients and their standard errors
-  tidy(mod)[ , c("term", "estimate", "std.error")]
+  # append y and expected value of y to the data frame
+  data[["y"]] <- E_y + eps
+  data[["ev"]] <- E_y
+  data
 }
 ```
+
+Set some parameters. We'll draw samples from the following model,
+$$
+\begin{aligned}[t]
+y &= x_1 + \epsilon \\
+\epsilon &\sim N(0, 1) \\
+x_1 &\sim N(0, 1)
+\end{aligned}
+$$
+Note that we are sampling $x_1$ from a normal distribution for convenience.
+The covariates of a normal distribution ***do not need to be normally distributed**.
 
 ```{r}
 n <- 100
 k <- 1
 beta <- c(0, rep(1, k))
-mu <- rep(0, k)
-X <- mvnorm_df(n, rep(0, k))
-E_y <- cbind(1, as.matrix(X)) %*% beta
-sigma_y <- r2_to_sigma(E_y, 0.5)
+X <- mvnorm_df(n, mu = 0, sigma = 1)
+sigma_y <- 1
 ```
 
-Run `sim_lm_normal` with these parameters `n_sims` times:
 ```{r}
-n_sims <- 2048
-res_sim1 <- map_df(seq_len(n_sims), function(i) sim_lm_normal(X, beta, sigma_y), .id = ".id")
+sim_lm_normal(X, ~ V1, beta)
 ```
 
-For these simulations, calculate the bias of the regression coefficients and standard error of the regression coefficient:
+Write a function to 
 ```{r}
-res_sim1 %>%
-  filter(term != "(Intercept)") %>%
-  summarise(beta_hat_mean = mean(estimate),
-            beta_hat_sd = sd(estimate),
-            se_mean = mean(std.error),
-            se_sd = sd(std.error)) %>%
-  mutate(beta_hat_bias = (beta_hat_mean - beta[-1]),
-         se_bias = (se_mean - beta_hat_sd))
-
-```
-
-Now rerun `sim_lm_normal` simultions, but vary the size of the sample
-```{r}
-sample_size <- c(8, 64, 512, 4096)
-```
-
-For each of these sample size, we will run `r n_sims` simulations, and save the results in a data fram along with the sample size:
-```{r}
-run_sim1a <- function(n) {
-  X <- mvnorm_df(n, mu = rep(0, k))
-  out <- map_df(seq_len(n_sims), 
-                function(i) sim_lm_normal(X, beta, sigma_y), .id = ".id")
-  out$n <- n
-  out
+est_ols <- function(data, formula, conf.level = 0.95) {
+  lm(formula, data = data) %>%
+    tidy(conf.int = TRUE, conf.level = conf.level)
 }
 ```
-Now run the above function for each sample size and return the results as a data frame with all simulations and sample sizes:
+
+This runs `lm` with `formula` and returns a tidy data frame.
 ```{r}
-res_sim1a <- map_df(sample_size, run_sim1a)
+sim_lm_normal(X, ~ V1, beta)
+```
+
+
+First, we want to simulate from a sample of size `n` and run a linear regression on it.
+```{r}
+sim1 <- function(n, .iter = NULL) {
+  # set parameters 
+  k <- 1
+  beta <- c(0, rep(1, k))
+  sigma_y <- 1
+  f <-  ~ V1
+  # simulate data
+  data <- sim_lm_normal(mvnorm_df(n, mu = rep(0, k), sigma = rep(1, k)),
+                        f, beta)
+  # estimate model
+  out <- est_ols(data, update(f, y ~ .))
+  # add simulation id
+  out[[".iter"]] <- .iter
+  # output results
+  out
+}
+
 ```
 
 ```{r}
-res_sim1a %>%
+sim1(100)
+```
+
+
+Run a simulation function (`FUN`) `m` times with one set of settings.
+```{r}
+run_one_sim <- function(.iter, .f, ...) {
+  # empty list to store results
+  ret <- vector(mode = "list", length = .iter)
+  for (i in seq_len(.iter)) {
+    # f and ... allows us to pass any function and any args (through ...)
+    # to f.
+    ret[[i]] <- .f(..., .iter = .iter)
+  }
+  # stack list of data frames -> data frame
+  bind_rows(ret)
+  # map_dfr(seq_len(m), function(.sim) f(..., .sim = .sim))
+}
+```
+
+Run multiple simulations with different options
+```{r}
+run_sims <- function(.iter, .f, .args = list(), ...) {
+  # empty list to store results
+  ret <- vector(mode = "list", length = length(.args))
+  # simulations - run .iter for each parameter.
+  for (i in seq_along(.args)) {
+    ret[[i]] <- do.call(run_one_sim, 
+                        c(list(.f = .f, .iter = .iter), .args[[i]]))
+    ret[[i]][[".arg"]] <- rerun(.iter, .args[[i]])
+    ret[[i]][[".sim"]] <- names(.args)[[i]]
+  }
+  # stack list of data frames -> data frame
+  bind_rows(ret)
+}
+```
+
+For example:
+```{r}
+iter <- 2 ^ 11
+sim1_args <- list(list(n = 16), list(n = 32), list(n = 64), list(n = 128),
+                  list(n = 256), list(n = 512), list(n = 1024))
+sim1_result <- run_sims(iter, sim1, sim1_args)
+```
+
+```{r}
+beta <- 1
+sim1_result %>%
   filter(term != "(Intercept)") %>%
+  mutate(n = map_dbl(.arg, "n")) %>%
   group_by(n) %>%
   summarise(beta_hat_mean = mean(estimate),
             beta_hat_sd = sd(estimate),
             se_mean = mean(std.error),
-            se_sd = sd(std.error)) %>%
-  mutate(beta_hat_bias = (beta_hat_mean - beta[-1]),
+            se_sd = sd(std.error),
+            coverage = mean(conf.low <= beta & conf.high >= beta)) %>%
+  mutate(beta_hat_bias = (beta_hat_mean - beta),
          se_bias = (se_mean - beta_hat_sd))
 ```
 
+## Sample size, P-values, and Power
 
-# Random X
-
-In the previous example, the data, $X$ are fixed. What happens if $X$ is random? 
-
+Draw sample of size `n` from normal distribution with mean `mean` and standard deviation `sd`,
+calculate a t-test against 0.
 ```{r}
-# Simulate from linear model model
-# random X uncorrelated with Y
-sim_lm_random_X <- function(n, mu_X, sigma_X, R_X, beta, sigma_y, ov = NULL) {
-  .data <- mvnorm_df(n, mu = mu_X, sigma = sigma_X, R = R_X,
-  # Generate the formula to estimate (potentially removing variables)
-  f <- paste0("y", "~", paste0(setdiff(names(.data), ov), collapse = "+"))
-  # generate and add y variable
-  E_y <- cbind(1, as.matrix(.data)) %*% beta
-  eps <- rnorm(n, mean = 0, sd = sigma)
-  .data$y <- E_y + eps
-  lm(f, data = .data, model = FALSE)
+sim_mean <- function(n, mean = 0, sd = 1, .iter = NULL) {
+  out <- select(tidy(t.test(rnorm(n, mean = mean, sd = sd))), 
+                estimate, p.value)
+  out[[".iter"]] <- .iter
+  out
 }
 ```
 
-**TODO**
-
-# Non-normal distribution
-
-What about if the errors are i.i.d, but generated from a non-normal distribution?
-
-There are two issues with the error distribution that will be considered:
-
-1. it is skewed 
-2. it has wider tails than a normal distribution
-
-We will handle both of these by considering errors generated from a skew t-distribution.
-The skew t-distribution is an extension of the Student's t-distribution that allows for skewness.
-
-- `df` = degrees of freedom, as in Student's t distribution When `df = Inf` it is the normal distribution, as `df` decreases, the tails of the distribution are wider than the normal
-- `xi` is the skewnewss parameter. If it is in (0, 1) it is left skew, if it is 1 then it is symmetric, and if `xi > 1` it is right skewed.
-
+Now run `.iter` of these t-tests
 ```{r}
-sim_skewt <- function(.data, beta, sigma, df = 5, skew = 1.5, ov = NULL) {
-  # if ov is not specified use the last variable in .datas
-  ov <- ov %||% names(.data)[ncol(.data)]
-  n <- nrow(.data)
-  E_y <- cbind(1, as.matrix(.data)) %*% beta
-  eps <- fGarch::rsstd(n, mean = 0, sd = sigma, nu = df, xi = skew)
-  .data$y <- E_y + eps
-  # generate linear regression formula - which excludes the
-  # omitted variable
-  f <- paste0("y", "~", paste0(setdiff(names(.data), ov), collapse = "+"))
-  lm(f, data = .data, model = FALSE)
+sim_means <- function(n, .iter, mean = 0, sd = 1) {
+  map_df(seq_len(.iter), ~ sim_mean(n, mean = mean, sd = sd, .iter = .iter))
 }
 ```
 
-# Non-constant errors 
-
-What if the errors are not constant? This can be done using `sim_lin_normal` by passing a vector to `sigma`.
-
-
-
-# Correlated errors
-
-## Clustered
-
-What if the errors are clustered? This means that within each group the errors are correlated.
-
-
+Run simulations with `mean = 0` and `n = 10`:
 ```{r}
-sim_cluster <- function(.data, groups, beta, sigma_y, sigma_g) {
-  n <- nrow(.data)
-  g <- cut_number(seq_len(n), groups, labels = false)
-  E_y <- cbind(1, as.matrix(.data)) %*% beta
-  # individual random error
-  eps <- rnorm(n, mean = 0, sd = sigma_y)
-  # group error
-  nu <- rnorm(groups, mean = 0, sd = sigma_g)
-  .data$y <- E_y + nu[g] + eps
-  # omitted variable
-  f <- paste0("y", "~", paste0(names(.data), collapse = "+"))
-  lm(f, data = .data, model.frame = FALSE, y = FALSE, X = FALSE)
-}
+n <- 100
+alpha <- 0.05
+sim2_results <- sim_means(n, .iter = 1000) %>%
+  mutate(significant = (p.value < alpha))
 ```
 
-## Serial Correlation
-
-What if the errors are correlated over time? 
-
+Plot the distribution of p-values:
 ```{r}
-sim_armax <- function(.data, groups, beta, sigma_y, ar = NULL, ma = NULL) {
-  n <- nrow(.data)
-  E_y <- cbind(1, as.matrix(.data)) %*% beta
-  # ARMA
-  eps <- arima.sim(list(ar = ar, ma = ma), n, sd = sigma_y)
-  # group error
-  .data$y <- E_y + eps
-  # omitted variable
-  f <- paste0("y", "~", paste0(names(.data), collapse = "+"))
-  lm(f, data = .data, model.frame = FALSE, y = FALSE, X = FALSE)
-}
+ggplot(sim2_results, aes(x = p.value)) +
+  geom_density()
 ```
 
-
-## Measurement Error
-
+Plot the distribution of estimates:
 ```{r}
-sim_measure_error <- function(.data, beta, sigma_y, rho) {
-  n <- nrow(.data)
-  E_y <- cbind(1, as.matrix(.data)) %*% beta
-  eps <- rnorm(n, mean = 0, sd = sigma_y)
-  y <- E_y + eps
-  # add measurement error before the regression
-  # Need to add *after* y is generated
-  # easier to do this without adding rho
-  for (i in seq_along(rho)) {
-    # scale of measurement error
-    # rho = delta^2 /  (delta^2 + var(x)^2)
-    # rho = 0 is no measurement error
-    # rho = 1 is all measurement error
-    delta <- sqrt(rho[[i]] / (1 - rho[[i]]) * var[[.data[[i]]]])
-    .data[[i]] <- .data[[i]] + rnorm(n, mean = 0, sd = delta)
-  }
-  # add y to the data frame
-  .data$y <- y
-  f <- paste0("y", "~", paste0(names(.data), collapse = "+"))
-  lm(f, data = .data, model = FALSE)
-}
+ggplot(sim2_results, aes(x = estimate)) +
+  geom_density()
 ```
 
-
-
-# Selection on Outcome and Predictors
-
-## Selection on the Outcome
-
-What if the sample is selected based on the value of $y$? This is often called "selection on the dependent variable"?
-
-```{r} 
-sim_select_y <- function(.data, beta, sigma_y, ub = 1, lb = 0) {
-  n <- nrow(.data)
-  E_y <- cbind(1, as.matrix(.data)) %*% beta
-  eps <- rnorm(n, mean = 0, sd = sigma_y)
-  y <- E_y + eps
-  # add y to the data frame
-  .data$y <- y
-  # remove all y values < quantile or greater than quantile
-  .data <- dplyr::filter(.data,
-                         y >= quantile(y, lb),
-                         y <= quantile(y, ub))
-  f <- paste0("y", "~", paste0(names(.data), collapse = "+"))
-  lm(f, data = .data, model.frame = FALSE, y = FALSE, X = FALSE)
-}
-```
-
-## Selection on Predictors
-
+Plot the distribution of estimate for "significant" and "insignificant" tests:
 ```{r}
-sim_select_x <- function(.data, beta, sigma_y, ub = 1, lb = 0) {
-  n <- nrow(.data)
-  E_y <- cbind(1, as.matrix(.data)) %*% beta
-  eps <- rnorm(n, mean = 0, sd = sigma_y)
-  y <- E_y + eps
-  # remove all x values < quantile or greater than quantile
-  tokeep <- rep(TRUE, n)
-  # but calculate all bounds prior to filtering
-  if (length(ub) == 1) {
-    ub <- rep(ub, ncol(.data))
-  }
-  if (length(lb) == 1) {
-    lb <- rep(lb, ncol(.data))
-  }
-  for (i in seq_along(ub)) {
-    tokeep <- (tokeep &
-               .data[[i]] >= quantile(.data[[i]], lb) &
-               .data[[i]] <= quantile(.data[[i]], ub))
-  }
-  # remove bad rows
-  .data <- .data[keep, , drop = FALSE]
-  # add y to the data frame
-  .data$y <- y
-  f <- paste0("y", "~", paste0(names(.data), collapse = "+"))
-  lm(f, data = .data, model = FALSE)
-}
+ggplot(sim2_results, aes(x = estimate, fill = significant)) +
+  geom_histogram()
 ```
+
+## Extensions
+
+- As you vary `n`, what happens to Type I errors, distribution of `p-values`,
+    and distribution of estimates conditional on a significant p-value?
+- Set `mean = 0.2`. As you vary `n`, what happens to Type II errors, distribution of `p-values`,
+    and distribution of estimates conditional on a significant p-value?
 
