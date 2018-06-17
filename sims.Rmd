@@ -26,7 +26,7 @@ $$
 \Sigma = \sigma' R \sigma
 $$
 This is useful because it can be easier to reason about correlation between random variables and their scales separately.
-In this application, results will depend on the correlation, but it will be useful to understand the relationship separely,
+In this application, results will depend on the correlation, but it will be useful to understand the relationship separately,
 ```{r sdcor2cov}
 sdcor2cov <- function(s, r = diag(length(s))) {
   s <- diag(s, nrow = length(s), ncol = length(s))
@@ -50,17 +50,6 @@ mvnorm_df <- function(n, mu, sigma = rep(1, length(mu)), R = diag(length(sd)),
 }
 ```
 
-For a normal linear model, given a sample $\hat{y}$ find the regression standard error, $\sigma^2$ to produce the desired $R^2$.
-While sample $R^2$ is not good for many things, it will easier to reason about it when choosing appropriate standard errors than the standard errors themselves.
-```{r }
-r2_to_sigma <- function(y, r2) {
-  # Var(Y) = E(Var(Y|X)) + Var(E(Y|X))
-  ssm <- sum((y - mean(y)) ^ 2)
-  sse <- (1 - r2) / r2 * ssm
-  # return sigma (assume population n)
-  sqrt(sse / n)
-}
-```
 
 
 # Classical Model
@@ -73,16 +62,6 @@ $$
 $$
 
 The following function will simulate data from a linear model with i.i.d. normally distributed errors.
-
-- `.data`: Data frame with covariates in $X$
-- `beta`: Coefficients
-- `sigma`: Standard error of the regression
-- `ov`: Any variables omitted when estimating OLS
-
-OLS sampler:
-
-- function to generate data
-- function to model
 
 ```{r}
 sim_lm_normal <- function(data, formula, beta, sigma = 1) {
@@ -118,7 +97,9 @@ sigma_y <- 1
 ```
 
 ```{r}
-sim_lm_normal(X, ~ V1, beta)
+ex <- sim_lm_normal(X, ~ V1, beta, sigma = sigma_y)
+ggplot(ex, aes(x = V1, y = y)) + 
+  geom_point() + geom_smooth(method = "lm")
 ```
 
 Write a function to 
@@ -131,7 +112,8 @@ est_ols <- function(data, formula, conf.level = 0.95) {
 
 This runs `lm` with `formula` and returns a tidy data frame.
 ```{r}
-sim_lm_normal(X, ~ V1, beta)
+data <- sim_lm_normal(X, ~ V1, beta)
+est_ols(data, y ~ V1)
 ```
 
 
@@ -160,7 +142,6 @@ sim1 <- function(n, .iter = NULL) {
 sim1(100)
 ```
 
-
 Run a simulation function (`FUN`) `m` times with one set of settings.
 ```{r}
 run_one_sim <- function(.iter, .f, ...) {
@@ -169,7 +150,7 @@ run_one_sim <- function(.iter, .f, ...) {
   for (i in seq_len(.iter)) {
     # f and ... allows us to pass any function and any args (through ...)
     # to f.
-    ret[[i]] <- .f(..., .iter = .iter)
+    ret[[i]] <- .f(..., .iter = i)
   }
   # stack list of data frames -> data frame
   bind_rows(ret)
@@ -204,7 +185,8 @@ sim1_result <- run_sims(iter, sim1, sim1_args)
 
 ```{r}
 beta <- 1
-sim1_result %>%
+sim1_sample <- 
+  sim1_result %>%
   filter(term != "(Intercept)") %>%
   mutate(n = map_dbl(.arg, "n")) %>%
   group_by(n) %>%
@@ -215,7 +197,13 @@ sim1_result %>%
             coverage = mean(conf.low <= beta & conf.high >= beta)) %>%
   mutate(beta_hat_bias = (beta_hat_mean - beta),
          se_bias = (se_mean - beta_hat_sd))
+sim1_sample
 ```
+
+```{r}
+ggplot(aes(x = x))
+```
+
 
 ## Sample size, P-values, and Power
 
@@ -241,7 +229,7 @@ Run simulations with `mean = 0` and `n = 10`:
 ```{r}
 n <- 100
 alpha <- 0.05
-sim2_results <- sim_means(n, .iter = 1000) %>%
+sim2_results <- sim_means(n, mean = 0.5,  .iter = 1000) %>%
   mutate(significant = (p.value < alpha))
 ```
 
